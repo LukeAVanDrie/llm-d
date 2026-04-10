@@ -27,7 +27,7 @@ The Latency Predictor runs as a set of sidecar containers alongside the EPP. Thr
 
 ```
                     ┌──────────────────────────────────────────────────────┐
-                    │                    EPP Pod                          │
+                    │                    EPP Pod                           │
                     │                                                      │
                     │  ┌────────────┐       ┌───────────────────────────┐  │
                     │  │    EPP     │       │   Training Server         │  │
