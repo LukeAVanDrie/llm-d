@@ -7,7 +7,7 @@ The Flow Control layer within the Endpoint Picker (EPP) is a critical mechanism 
 
 ### The LLM Queuing Problem
 
-Traditional API gateways rate-limit by Requests Per Second (RPS), assuming every request consumes roughly the same resources. In LLM serving, this approach is ill-suited. Resource consumption is driven by heavy input contexts and the unpredictable **autoregressive decode loop** (output tokens). A single request can consume orders of magnitude more compute and memory than another, making serving capacity highly variable per request. Static RPS limits either starve the pool by being too conservative or cause overload by being too aggressive.
+Traditional API gateways rate-limit by Requests Per Second (RPS), assuming every request consumes roughly the same resources. In LLM serving, this approach is ill-suited. Resource consumption is driven by long input contexts and the unpredictable **autoregressive decode loop** (output tokens). A single request can consume orders of magnitude more compute and memory than another, making serving capacity highly variable per request. Static RPS limits either starve the pool by being too conservative or cause overload by being too aggressive.
 
 Without Flow Control, the following issues arise:
 
@@ -20,7 +20,7 @@ By shifting queuing to the EPP, we can govern physical capacity (KV cache, queue
 
 ### Architecture Overview
 
-The Flow Control layer intercepts requests at the proxy layer and holds them in centralized, policy-aware queues when the backend pool is saturated. This prevents requests from piling up in isolated endpoint queues where they cannot be dynamically re-routed or prioritized.
+The Flow Control layer intercepts requests at the EPP and holds them in centralized, policy-aware queues when the backend pool is saturated. This prevents requests from piling up in isolated endpoint queues where they cannot be dynamically re-routed or prioritized.
 
 #### Queuing Topology & The 3-Tier Dispatch
 
@@ -202,10 +202,8 @@ metadata:
 featureGates:
 - flowControl
 plugins:
-- name: round-robin-fairness-policy
-  type: round-robin-fairness-policy
-- name: fcfs-ordering-policy
-  type: fcfs-ordering-policy
+- type: round-robin-fairness-policy
+- type: fcfs-ordering-policy
 - name: my-concurrency-detector
   type: concurrency-detector
   parameters:
@@ -313,6 +311,7 @@ Understanding the guaranteed capabilities and inherent boundaries of the Flow Co
 
 *   **Absolute Capacity Shortages**: Flow Control only handles *when* and *in what order* requests are dispatched. It cannot make the pool faster or create capacity that doesn't exist.
 *   **TTFT Shifts (Not Elimination)**: Flow Control cannot remove wait time when the system is over capacity. By enabling it, you make the **explicit choice to protect TPOT at the expense of queue time**. Its core function is simply controlling **where** and **for whom** TTFT (Time-To-First-Token) is accrued (accruing it safely in the EPP rather than letting it context-thrash the GPU).
+*   **Non-Persistence**: Queues are stored purely in-memory. If the EPP process restarts or fails, queued requests are lost. During a graceful shutdown, the EPP will attempt to evict queued requests with an internal error (HTTP 500), whereas abrupt crashes will result in hard connection drops for the client.
 
 ### Failure Modes & Error Mapping
 
@@ -372,7 +371,7 @@ The Flow Control layer behavior is customizable via several extension points imp
 ### Advanced Use Cases: Autoscaling
 
 #### True Demand Autoscaling
-Traditional metrics like GPU utilization fail to quantify unfulfilled demand because LLM compute is highly non-linear. Shifting the queue to the EPP provides a definitive "True Demand" metric (Queue Depth). External scalers like KEDA can use this metric to scale out replicas based on the exact volume of traffic waiting to be served.
+Traditional metrics like GPU utilization fail to quantify unfulfilled demand because LLM compute is highly non-linear. Shifting the queue to the EPP provides a definitive "True Demand" metric (Queue Depth). External scalers like KEDA can use this metric to scale out replicas based on the exact volume of traffic waiting to be served. See [Autoscaling](../../advanced/autoscaling) for more details.
 
 ### Metrics & Observability
 
