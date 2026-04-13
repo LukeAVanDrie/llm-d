@@ -217,62 +217,53 @@ See [Scheduling](scheduling.md) for more architectural details on how the EPP's 
 
 #### `flowControl`
 
+See [Flow Control](flow-control.md) for more architectural details on how the EPP's flow control layer works internally.
+
 The `flowControl` section configures the EPP's Flow Control layer, which acts as a pool defense mechanism by buffering requests before they reach backend model servers. Flow Control implements a 3-tier dispatch hierarchy: **Priority → Fairness → Ordering**. For a visual breakdown of how this looks in practice, see the [Queuing Topology diagram in the Flow Control reference](flow-control.md#queuing-topology--the-3-tier-dispatch).
 
 When flow control is enabled (via the `FlowControl` feature gate), incoming requests are queued in memory and dispatched according to configured priority bands, fairness policies, and ordering policies. When the pool is saturated (as determined by the [saturation detector](#saturationdetector)), requests are held in the queue until capacity frees up.
 
-The following example demonstrates how to supply this configuration via the Helm chart's `values.yaml` file, using the `pluginsCustomConfig` feature to inject the `EndpointPickerConfig`. It shows how to configure the `featureGates`, the `plugins` list, the `saturationDetector`, and the `flowControl` section to work together.
+The following example demonstrates a complete `EndpointPickerConfig` with flow control enabled, showing how to configure the `featureGates`, `plugins`, `saturationDetector`, and `flowControl` sections to work together.
 
 ```yaml
-inferenceExtension:
-  pluginsConfigFile: "custom-plugins.yaml"
-  pluginsCustomConfig:
-    custom-plugins.yaml: |
-      apiVersion: inference.networking.x-k8s.io/v1alpha1
-      kind: EndpointPickerConfig
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
 
-      featureGates:
-      - flowControl
+featureGates:
+- flowControl
 
-      plugins:
-      - name: round-robin-fairness-policy
-        type: round-robin-fairness-policy
-      - name: fcfs-ordering-policy
-        type: fcfs-ordering-policy
-      - name: global-strict-fairness-policy
-        type: global-strict-fairness-policy
-      - name: my-concurrency-detector
-        type: concurrency-detector
-      # ... other plugins ...
+plugins:
+- type: round-robin-fairness-policy
+- type: fcfs-ordering-policy
+- type: global-strict-fairness-policy
+- type: utilization-detector
+# ... other plugins ...
 
-      saturationDetector:
-        pluginRef: my-concurrency-detector
+saturationDetector:
+  pluginRef: utilization-detector # Default
 
-      flowControl:
-        maxBytes: "10Gi"
-        maxRequests: "5000"
-        defaultRequestTTL: "60s"
+flowControl:
+  maxBytes: "0" # Default: unlimited
+  maxRequests: "0" # Default: unlimited
+  defaultRequestTTL: "0s" # Default: uses client context deadline
 
-        defaultPriorityBand:
-          maxBytes: "1Gi"
-          maxRequests: "1000"
-          orderingPolicyRef: fcfs-ordering-policy
-          fairnessPolicyRef: global-strict-fairness-policy
+  defaultPriorityBand:
+    maxBytes: "1Gi" # Default
+    maxRequests: "0" # Default: unlimited
+    orderingPolicyRef: fcfs-ordering-policy # Default
+    fairnessPolicyRef: global-strict-fairness-policy # Default
 
-        priorityBands:
-        - priority: 100
-          maxBytes: "5Gi"
-          maxRequests: "500"
-          orderingPolicyRef: fcfs-ordering-policy
-          fairnessPolicyRef: round-robin-fairness-policy
+  priorityBands: # Only showing overrides; fields not specified inherit from defaults
+  - priority: 100
+    maxBytes: "5Gi"
+    maxRequests: "500"
+    fairnessPolicyRef: round-robin-fairness-policy
 
-        - priority: 50
-          maxBytes: "2Gi"
-          maxRequests: "200"
-          orderingPolicyRef: fcfs-ordering-policy
-          fairnessPolicyRef: global-strict-fairness-policy
+  - priority: 50
+    maxBytes: "2Gi"
+    maxRequests: "200"
 
-      # ... other sections (schedulingProfiles, dataLayer, etc.) ...
+# ... other sections (schedulingProfiles, dataLayer, etc.) ...
 ```
 
 ##### Global Fields
@@ -293,53 +284,25 @@ These fields apply to both `defaultPriorityBand` and entries in `priorityBands`:
 - `orderingPolicyRef`: References a plugin name for request ordering within the band. Default: `fcfs-ordering-policy`.
 - `fairnessPolicyRef`: References a plugin name for fairness policy within the band. Default: `global-strict-fairness-policy`.
 
-##### Fairness Policies
+For a full list of available Fairness and Ordering policies, see the [Flow Control reference](flow-control.md#concrete-plugins).
 
-Fairness policies control how requests from different flows (e.g., different tenants) are interleaved within a priority band.
 
-*   **[`global-strict-fairness-policy`](placeholder)**: Ignores flow isolation and serves all requests in a single global order based on the Ordering Policy.
-*   **[`round-robin-fairness-policy`](placeholder)**: Guarantees fair sharing by cycling through active flows one by one.
+##### `saturationDetector`
 
-##### Ordering Policies
-
-Ordering policies control the order in which requests are dispatched from the queue within a given flow.
-
-*   **[`fcfs-ordering-policy`](placeholder)**: First-Come, First-Served based on arrival time. (Default)
-*   **[`edf-ordering-policy`](placeholder)**: Earliest Deadline First, prioritizing requests with the closest expiration time.
-*   **[`slo-deadline-ordering-policy`](placeholder)**: Orders requests by an SLO-based deadline computed from arrival time.
-
-See [Flow Control](flow-control.md) for more architectural details on how the EPP's flow control layer works internally.
-
-#### `saturationDetector`
-
-The `saturationDetector` section configures the saturation detection mechanism, which acts as a safety valve to evaluate whether the backend InferencePool is overloaded and protects endpoints from exceeding optimal capacity.
-
-The behavior of the saturation detector depends on whether flow control is enabled:
-
-- **Flow Control enabled**: When the pool is saturated, request dispatch is paused and incoming requests are buffered in the flow control memory queues (respecting priority and fairness policies) until backend capacity frees up. The Saturation Detector acts as the gatekeeper for these centralized queues; see the [Dispatch Lifecycle section in the Flow Control reference](flow-control.md#the-dispatch-lifecycle) for details.
-- **Flow Control disabled** (default): When the pool is saturated, "sheddable" requests (those with negative priority) are immediately rejected with HTTP 429 (Too Many Requests). All other requests pass directly to the model servers.
+The `saturationDetector` section configures the mechanism that evaluates whether the backend InferencePool is overloaded.
 
 The `saturationDetector` section has the following form:
 
 ```yaml
 saturationDetector:
-  pluginRef: utilization-detector
+  pluginRef: utilization-detector # Default
 ```
 
-##### Fields
+###### Fields
 
 - `pluginRef`: References a plugin instance defined in the global `plugins` section. Defaults to `utilization-detector` if omitted or empty. *Note: If a `utilization-detector` is not explicitly defined in your `plugins` array, the gateway will automatically instantiate one under the hood using standard default parameters.*
 
-> [!NOTE]
-> #### The "Healthy Buffer" Principle
-> Regardless of which detector you use, the core goal of tuning saturation detection is to maintain a small, **"healthy buffer"** of requests queued locally on the model servers themselves. This buffer should be just large enough to ensure continuous batching engines never starve for work, but small enough that the vast majority of queuing happens centrally in the EPP where priority and fairness can be enforced.
-
-##### Saturation Detector Plugins
-
-Saturation detectors evaluate whether the pool has capacity for more dispatches.
-
-*   **[`utilization-detector`](placeholder)**: Closed-loop detector reacting to real-time telemetry (queue depth, KV cache). Highly accurate but subject to telemetry lag ("thundering herd"). (Default)
-*   **[`concurrency-detector`](placeholder)**: Open-loop detector based on active in-flight request accounting. Instantaneous reaction but blind to actual hardware memory pressure (KV cache filling).
+For a full list of available Saturation Detector plugins, see the [Flow Control reference](flow-control.md#concrete-plugins).
 
 
 ### High Availability
@@ -385,9 +348,6 @@ These metrics provide visibility into the InferencePool health and scheduling de
 | `inference_extension_info` | Gauge | `commit`, `build_ref` | EPP build information |
 | `inference_extension_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `pod_name`, `namespace`, `port` | Number of scheduling attempts and their outcomes |
 
-#### Flow Control Metrics
-
-When flow control is enabled, the system exposes detailed metrics for queue depths, dispatch cycles, and saturation. For a full list of these metrics and their labels, see the [Flow Control reference](flow-control.md#metrics--observability).
 
 
 #### Monitoring Stack

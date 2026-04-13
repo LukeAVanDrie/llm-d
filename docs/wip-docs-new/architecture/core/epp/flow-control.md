@@ -356,22 +356,45 @@ The Flow Control layer behavior is customizable via several extension points imp
 ### Concrete Plugins
 
 #### Fairness Policies
-*   **[`global-strict-fairness-policy`](placeholder)**: Ignores flow isolation and serves all requests in a single global order based on the Ordering Policy.
-*   **[`round-robin-fairness-policy`](placeholder)**: Guarantees fair sharing by cycling through active flows one by one.
+*   **[`global-strict-fairness-policy`](placeholder)**: Ignores flow isolation and serves all requests in a single global order based on the Ordering Policy. Ideal when strict global ordering must be enforced across all requests within the band and fairness is not a concern.
+*   **[`round-robin-fairness-policy`](placeholder)**: Guarantees fair sharing by cycling through active flows one by one. Prevents a single high-volume flow from starving others (solving the "Noisy Neighbor" problem).
 
 #### Ordering Policies
 *   **[`fcfs-ordering-policy`](placeholder)**: First-Come, First-Served based on arrival time. (Default)
 *   **[`edf-ordering-policy`](placeholder)**: Earliest Deadline First, prioritizing requests with the closest expiration time.
-*   **[`slo-deadline-ordering-policy`](placeholder)**: Orders requests by an SLO-based deadline computed from arrival time.
+*   **[`slo-deadline-ordering-policy`](placeholder)**: Orders requests by an SLO-based deadline computed from arrival time. Uses the `x-slo-ttft-ms` header. Requests without this header are placed behind all SLO requests, risking starvation.
 
 #### Saturation Detectors
-*   **[`utilization-detector`](placeholder)**: Closed-loop detector reacting to real-time telemetry (queue depth, KV cache). Highly accurate but subject to telemetry lag ("thundering herd"). (Default)
-*   **[`concurrency-detector`](placeholder)**: Open-loop detector based on active in-flight request accounting. Instantaneous reaction but blind to actual hardware memory pressure (KV cache filling).
+
+The behavior of the saturation detector depends on whether flow control is enabled:
+
+- **Flow Control enabled**: When the pool is saturated, request dispatch is paused and incoming requests are buffered in the flow control memory queues (respecting priority and fairness policies) until backend capacity frees up. The Saturation Detector acts as the gatekeeper for these centralized queues; see the [Dispatch Lifecycle section](#the-dispatch-lifecycle) for details.
+- **Flow Control disabled** (default): When the pool is saturated, "sheddable" requests (those with negative priority) are immediately rejected with HTTP 429 (Too Many Requests). All other requests pass directly to the model servers.
+
+Available plugins:
+
+*   **[`utilization-detector`](placeholder)**: Closed-loop detector reacting to real-time telemetry (queue depth, KV cache). Highly accurate but subject to telemetry lag ("thundering herd"). In heterogeneous pools, it treats all endpoints equally (unweighted average), meaning a small saturated endpoint can trigger global backpressure. (Default)
+*   **[`concurrency-detector`](placeholder)**: Open-loop detector based on active in-flight request accounting. Instantaneous reaction but blind to actual hardware memory pressure (KV cache filling). In heterogeneous pools, it biases toward the state of larger endpoints (aggregate capacity model).
+
+> [!NOTE]
+> #### The "Healthy Buffer" Principle
+> Regardless of which detector you use, the core goal of tuning saturation detection is to maintain a small, **"healthy buffer"** of requests queued locally on the model servers themselves.
+>
+> This buffer should be just large enough to ensure continuous batching engines never starve for work, but small enough that the vast majority of queuing happens centrally in the EPP where priority and fairness can be enforced.
+>
+> **Tuning the Buffer:**
+>
+> Tuning this buffer involves adjusting the specific parameters of the configured Saturation Detector. For instance:
+>
+> *   In the `utilization-detector`, this is typically controlled via the `queueDepthThreshold` parameter.
+> *   In the `concurrency-detector`, it is controlled by setting `maxConcurrency` just above your model server's effective batch size.
+>
+> See the linked READMEs for each detector above for full details on their available knobs.
 
 ### Advanced Use Cases: Autoscaling
 
 #### True Demand Autoscaling
-Traditional metrics like GPU utilization fail to quantify unfulfilled demand because LLM compute is highly non-linear. Shifting the queue to the EPP provides a definitive "True Demand" metric (Queue Depth). External scalers like KEDA can use this metric to scale out replicas based on the exact volume of traffic waiting to be served. See [Autoscaling](../../advanced/autoscaling) for more details.
+Traditional metrics like GPU utilization fail to quantify unfulfilled demand because LLM compute is highly non-linear. Shifting the queue to the EPP provides a definitive "True Demand" metric (Queue Depth). External scalers like KEDA can use this metric to scale out replicas based on the exact volume of traffic waiting to be served. See [Autoscaling](../../advanced/autoscaling/autoscaling.md) for more details.
 
 ### Metrics & Observability
 
