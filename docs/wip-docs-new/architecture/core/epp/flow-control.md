@@ -204,8 +204,7 @@ featureGates:
 plugins:
 - type: round-robin-fairness-policy
 - type: fcfs-ordering-policy
-- name: my-concurrency-detector
-  type: concurrency-detector
+- type: my-concurrency-detector
   parameters:
     maxConcurrency: 15
     concurrencyMode: requests
