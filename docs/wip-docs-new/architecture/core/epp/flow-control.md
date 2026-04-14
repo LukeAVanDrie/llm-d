@@ -204,7 +204,7 @@ featureGates:
 plugins:
 - type: round-robin-fairness-policy
 - type: fcfs-ordering-policy
-- type: my-concurrency-detector
+- type: concurrency-detector
   parameters:
     maxConcurrency: 15
     concurrencyMode: requests
@@ -212,7 +212,7 @@ plugins:
 # ... other plugins ...
 
 saturationDetector:
-  pluginRef: my-concurrency-detector
+  pluginRef: concurrency-detector
 
 flowControl:
   maxBytes: "10Gi"
