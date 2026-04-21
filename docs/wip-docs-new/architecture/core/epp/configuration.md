@@ -1,8 +1,6 @@
-NEEDS TO BE REDONE!
+# EPP Configuration
 
-## EPP Configuration
-
-The `EndpointPickerConfig` is used to configure the EPP deployment.
+The `EndpointPickerConfig` is the central configuration for the Endpoint Picker (EPP), defining the graph of plugins and parameters that drive request handling, flow control, and scheduling decisions.
 
 The configuration text has the following form:
 
@@ -12,35 +10,53 @@ kind: EndpointPickerConfig
 plugins:
 - ....
 - ....
-schedulingProfiles:
-- ....
-- ....
-saturationDetector:
-  ...
-data:
-  ...
-flowControl:
+featureGates:
   ...
 parser:
   ...
-featureGates:
+flowControl:
+  ...
+saturationDetector:
+  ...
+schedulingProfiles:
+- ....
+- ....
+dataLayer:
   ...
 ```
 
-> NOTE: While the configuration text looks like a Kubernetes CRD, it is NOT a Kubernetes CRD. Specifically, the config is not reconciled upon, and is only read on startup. This behavior is intentional, as augmenting the scheduling config without redeploying the EPP is not supported.
+> [!IMPORTANT]
+> While the configuration syntax looks like a Kubernetes Custom Resource, it is **not** a Kubernetes CRD. The configuration is not reconciled by a controller and is only read on startup. Updating the configuration requires a restart of the EPP.
 
-- The first two lines of the configuration are constant and must appear as is.
-- The [`plugins`](#plugins) section defines the set of plugins that will be instantiated and their parameters.
-- The [`schedulingProfiles`](#schedulingprofiles) section defines the set of scheduling profiles that can be used in scheduling requests to pods.
-- The [`saturationDetector`](#saturationdetector) section configures the saturation detector.
-- The [`flowControl`](#flowcontrol) section configures the Flow Control layer, which manages request concurrency and fairness.
-- The [`data`](#data) section configures the data layer, which is used to gather information (such as metrics) used in making scheduling decisions.
-- The [`parser`](#parser) section configures the parser, which is used to understand the payload of requests and responses for features like prefix-cache aware routing and
-- The [`featureGates`](#featureGates) section allows the enablement of experimental features of the IGW. This section is described in more detail in the section Feature Gates.usage tracking.
+- **Metadata**: The first two lines of the configuration are constant (`apiVersion` and `kind`) and must appear as is.
+- **Plugins**: Defines the set of plugins that will be instantiated and their parameters.
+- **Feature Gates**: Enables or disables specific experimental or optional features (such as Flow Control).
+- **Request Handling**: Manages the full lifecycle of requests around the scheduling phase, spanning protocol parsing, state preparation via data producers, and final admission decisions.
+- **Flow Control**: Manages pool defense and multi-tenancy by queuing requests at the gateway to enforce priority and fairness, while evaluating pool saturation to prevent overload (combines `flowControl` and `saturationDetector` fields).
+- **Scheduling**: Defines the profiles and plugins used to select the optimal model server candidate for each request (via Filter -> Score -> Pick lifecycle).
+- **Data Layer**: Configures the backend sources and metrics collection used for smart scheduling decisions and observability.
 
-### Using the `EndpointPickerConfig`
+## Configuration Mental Model: Plugins and Wiring
 
-The `EndpointPickerConfig` command line argument `--config-file` should be used to specify the full path of the file in question. For example:
+The `EndpointPickerConfig` forms a configuration **graph** that defines how the EPP operates across three layers:
+
+- **Plugins (The Nodes)**: In the `plugins` section, you instantiate specific implementations (e.g., a custom scorer or a fairness policy) and provide their parameters.
+- **Wiring (The Edges)**: In structural sections like `schedulingProfiles` or `flowControl`, you link these plugins by name to specific architectural roles (e.g., telling a profile to use a specific scorer).
+- **Static Runtime Configuration**: Alongside the graph, flat configuration parameters (like `maxBytes` or `defaultRequestTTL`) set static operational limits and defaults for the runtime.
+
+This design allows you to define a plugin once and reuse it across multiple profiles or priority bands without duplicating its parameters.
+
+> [!NOTE]
+> **Auto-Wiring**: Some subsystems support automatic binding. If a plugin is declared in the top-level `plugins` list and implements a specific Go interface (like `Admitter`, `DataProducer`, or advanced hooks like `PreRequest`, `ResponseHeaderProcessor`, and `ResponseBodyProcessor`), the system will automatically discover and bind it to its role without requiring an explicit edge in the structural configuration.
+
+To ensure the integrity of this graph, the following **validation rules** apply across all layers:
+- **Valid References**: Any field that references a plugin (e.g., `pluginRef` in `schedulingProfiles` or `saturationDetector`) must reference a valid name defined in the top-level `plugins` section.
+- **Unique Names**: All instances within lists that require naming (like `schedulingProfiles`) must have unique, non-empty names.
+- **Data Dependencies**: The system validates that metrics extractors form a Directed Acyclic Graph (DAG) without circular dependencies, ensuring correct execution order.
+
+## Using the `EndpointPickerConfig`
+
+Use the `--config-file` command-line argument to specify the path to the configuration file. For example:
 
 ```yaml
 apiVersion: apps/v1
@@ -63,10 +79,10 @@ spec:
         - "${POOL_NAME}"
         ...
         - --config-file
-        - "/etc/epp/epp-config.yaml"
+        - "/etc/epp/epp-config.yaml" # Typically mounted from a ConfigMap
 ```
 
-If the configuration is passed as in-line text the EPP command line argument `--config-text` should be used. For example:
+If the configuration is passed as inline text, use the `--config-text` command-line argument. For example:
 
 ```yaml
 apiVersion: apps/v1
@@ -102,14 +118,14 @@ spec:
           - name: default
             plugins:
             - pluginRef: prefix-cache-scorer
-              weight: 50
+              weight: 1 # Default
 ```
 
-### Configuration Guide
+## Configuration Guide
 
-#### `plugins`
+### `plugins`
 
-The section declares the set of plugins to be instantiated along with their parameters.
+This section declares the set of plugins to be instantiated along with their parameters.
 
 Each plugin can also be given a name, enabling the same plugin type to be instantiated multiple times, if needed (such as when configuring multiple scheduling profiles). Each entry in this section has the following form:
 
@@ -127,97 +143,73 @@ The fields in a plugin entry are:
 - `type` specifies the type of the plugin to be instantiated.
 - `parameters` which is optional, defines the set of parameters used to configure the plugin in question. The actual set of parameters varies from plugin to plugin.
 
-#### `schedulingProfiles`
+### `featureGates`
 
-The `schedulingProfile` section defines how the EPP's Scheduling component works. If one is not defined, a default `schedulingProfile` named `default` will be added and will reference all of the instantiated plugins.
-
-The number of scheduling profiles depends on the use case:
-
-- For aggregated serving - one profile is needed
-- For disaggregated servings - two profiles are required (one for prefill and one for decode).
-
-Each `schedulingProfile` can have:
-
-- a set of `filters` (optional -- if unset, uses no filter)
-- a set of `scorers` with `weights`
-- a `picker` (optional -- if unset, uses `max-score-picker`)
-
-Each entry in this section has the following form:
+The `featureGates` section enables optional or experimental features in the EPP. Features listed here are activated; if omitted, they remain disabled.
 
 ```yaml
-- name: aName
-  plugins:
-  - pluginRef: plugin1
-  - pluginRef: plugin2
-    weight: 50
+featureGates:
+- flowControl
 ```
 
-Below is a simple concrete example, which configures the EPP to use aggregated serving, consider the prefix-cache hit, the queue depth, and kv cache utilization in the scheduling decision.
+**Supported Feature Gates:**
+
+- `flowControl`: Enables the Admission and Flow Control layer. This must be enabled to use the `flowControl` configuration section.
+- `dataLayer`: Enables the experimental Data Layer APIs for advanced metrics collection and extraction.
+
+### Request Handling
+
+This section covers components that process requests and responses before they reach the scheduling phase, or after a backend has been selected.
+
+> For full architectural details and a list of available parsers, admitters, and data producers, see the [Request Handling reference](request-handling.md).
+
+#### Parsers
+
+The `parser` section configures how the EPP understands protocol messages (e.g., OpenAI or vLLM payloads). To use a non-default parser, you must first instantiate it in the `plugins` section and then reference its name in the `parser` field:
 
 ```yaml
-pluginsConfigFile: "custom-plugins.yaml"
-  pluginsCustomConfig:
-    custom-plugins.yaml: |
-      apiVersion: inference.networking.x-k8s.io/v1alpha1
-      kind: EndpointPickerConfig
-      plugins:
-      - type: prefix-cache-scorer
-      - type: queue-scorer
-      - type: kv-cache-utilization-scorer
-      - type: max-score-picker
-      schedulingProfiles:
-      - name: default
-        plugins:
-        - pluginRef: prefix-cache-scorer
-          weight: 3
-        - pluginRef: queue-scorer
-          weight: 2
-        - pluginRef: kv-cache-utilization-scorer
-          weight: 2
-        - pluginRef: max-score-picker
+plugins:
+- name: myParser
+  type: vllmgrpc-parser
+# ...
+parser:
+  pluginRef: myParser
 ```
 
-There are two types of plugins related to Scheduling: `Scorers` and `Pickers`
+If unspecified, `openai-parser` is used by default. (Note: Current parsers do not accept any configuration parameters in the `plugins` section).
 
-#### Scorers
+#### Admitters & Data Producers
 
-During the scheduling process, each pod receives a score for each scorer in the `schedulingProfile`:
+Admitters and Data Producers are specialized plugins that execute during the initial request processing phase:
+*   **Admitters** perform early checks to accept or reject requests before they enter the queue.
+*   **Data Producers** gather contextual information (like predicted latency or prefix cache status) required by downstream components.
 
-- `prefix-cache-scorer`: Scores pods based on the amount of the prompt is believed to be in the pod's KvCache. Parameters:
-  - `blockSize`: specified the size of the blocks to break up the input prompt when calculating the block hashes. If not specified defaults to 64
-  - `maxPrefixBlocksToMatch`: specifies the maximum number of prefix blocks to match. If not specified defaults to 256
-  - `lruCapacityPerServer`: specifies the capacity of the LRU indexer in number of entries per server (pod). If not specified defaults to 31250
+As introduced in the [Mental Model](#configuration-mental-model-plugins-and-wiring), these plugins support automatic interface-based binding. This reduces boilerplate configuration that would otherwise be needed to wire them explicitly.
 
-- `lora-affinity-scorer`: Scores pods based on whether the requested LoRA adapter is already loaded in the pod's HBM, or if the pod is ready to load the LoRA on demand. Parameters:
-  - none
+If an admitter or data producer plugin is declared in the top-level `plugins` list, the system automatically recognizes it by its capabilities at startup and binds it to the appropriate lifecycle hook:
 
-- `kv-cache-utilization-scorer`: Scores the candidate pods based on their KV cache utilization. Parameters:
-  - none
+*   **Admitters**: Automatically bound if they implement the Go interface for admitting or rejecting requests early.
+*   **Data Producers**: Automatically bound if they implement the Go interface for gathering per-request data (like latency predictions) needed by other components.
 
-- `queue-scorer`: Scores list of candidate pods based on the pod's waiting queue size. The lower the waiting queue size the pod has, the higher the score it will get (since it's more available to serve new request). Parameters:
-  - none
+To enable these plugins, simply list them in the `plugins` section:
 
-- `running-requests-size-scorer`: Scores candidate pods based on the number of requests currently being processed (in-flight) on each pod. Pods with fewer running requests receive a higher score. Scores are normalized across the candidate set — the pod with the fewest running requests scores 1.0, the pod with the most scores 0.0, and all others are linearly interpolated. When all candidates have the same count, every pod receives a neutral score of 1.0.
-  - none
+```yaml
+plugins:
+- name: latency-admitter
+  type: latency-slo-admitter
+  parameters: ...
+- name: latency-producer
+  type: predicted-latency-producer
+  parameters: ...
+```
 
----> XXX ---> What Else Is Missing?
+They are automatically active and do not need to be referenced elsewhere in the configuration.
 
-#### Pickers
 
-After each pod receives a score for each scorer which are combined using the `weights`, the `picker` configures how we select the pod.
 
-- `max-score-picker`: Picks the pod with the maximum score from the list of candidates. This is the default picker plugin if not specified. Parameters:
-  - `maxNumOfEndpoints`: Maximum number of endpoints to pick from the list of candidates, based on the scores of those endpoints. If not specified defaults to 1
+---
 
-- `random-picker`: Picks a random pod from the list of candidates. Parameters:
-  - `maxNumOfEndpoints`: Maximum number of endpoints to pick from the list of candidates. If not specified defaults to 1
-
-- `weighted-random-picker`: Picks pod(s) from the list of candidates based on weighted random sampling using A-Res algorithm. Parameters:
-  - `maxNumOfEndpoints`: Maximum number of endpoints to pick from the list of candidates. If not specified defaults to 1.
-
-See [Scheduling](scheduling.md) for more architectural details on how the EPP's scheduler uses these components internally.
-
-#### `flowControl`
+### `flowControl`
 
 See [Flow Control](flow-control.md) for more architectural details on how the EPP's flow control layer works internally.
 
@@ -245,25 +237,25 @@ saturationDetector:
   pluginRef: utilization-detector # Default
 
 flowControl:
-  maxBytes: "0" # Default: unlimited
-  maxRequests: "0" # Default: unlimited
+  maxBytes: 0 # Default: unlimited
+  maxRequests: 0 # Default: unlimited
   defaultRequestTTL: "0s" # Default: uses client context deadline
 
   defaultPriorityBand:
     maxBytes: "1Gi" # Default
-    maxRequests: "0" # Default: unlimited
+    maxRequests: 0 # Default: unlimited
     orderingPolicyRef: fcfs-ordering-policy # Default
     fairnessPolicyRef: global-strict-fairness-policy # Default
 
   priorityBands: # Only showing overrides; fields not specified inherit from defaults
   - priority: 100
     maxBytes: "5Gi"
-    maxRequests: "500"
+    maxRequests: 500
     fairnessPolicyRef: round-robin-fairness-policy
 
   - priority: 50
     maxBytes: "2Gi"
-    maxRequests: "200"
+    maxRequests: 200
 
 # ... other sections (schedulingProfiles, dataLayer, etc.) ...
 ```
@@ -281,15 +273,17 @@ flowControl:
 These fields apply to both `defaultPriorityBand` and entries in `priorityBands`:
 
 - `priority`: (Required for `priorityBands` entries) Integer priority level; higher values mean higher priority.
-- `maxBytes`: Aggregate byte limit for the band. Default: 1 GB.
+- `maxBytes`: Aggregate byte limit for the band. Default: `1Gi`.
 - `maxRequests`: Concurrent request limit for the band. Default: no per-band limit.
 - `orderingPolicyRef`: References a plugin name for request ordering within the band. Default: `fcfs-ordering-policy`.
 - `fairnessPolicyRef`: References a plugin name for fairness policy within the band. Default: `global-strict-fairness-policy`.
 
 For a full list of available Fairness and Ordering policies, see the [Flow Control reference](flow-control.md#concrete-plugins).
 
-
 ##### `saturationDetector`
+
+> [!NOTE]
+> While `saturationDetector` is presented here conceptually as part of Flow Control, it is a **top-level field** in the YAML schema, at the same level as `flowControl`.
 
 The `saturationDetector` section configures the mechanism that evaluates whether the backend InferencePool is overloaded.
 
@@ -306,53 +300,173 @@ saturationDetector:
 
 For a full list of available Saturation Detector plugins, see the [Flow Control reference](flow-control.md#concrete-plugins).
 
+---
 
-### High Availability
+### `schedulingProfiles`
 
-To deploy the EndpointPicker in a high-availability (HA) active-passive configuration set `replicas` to be greater than one. In such a setup, only one "leader" replica will be active and ready to process traffic at any given time. If the leader pod fails, another pod will be elected as the new leader, ensuring service continuity.
+The `schedulingProfiles` section configures the EPP's Scheduling component. For full architectural details and a list of available filters, scorers, and pickers, see the [Scheduling reference](scheduling.md).
+
+Incoming requests are routed to candidate model servers by executing a pipeline of filters, scorers, and a final picker defined in these profiles.
+
+The following example demonstrates how to configure a scheduling profile with concrete values that are recommended for a typical production setup:
+
+```yaml
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: label-selector-filter # Optional: not in default profile
+  - pluginRef: precise-prefix-cache-scorer # Recommended: not in default profile
+    weight: 3.0
+  - pluginRef: kv-cache-utilization-scorer # Recommended: not in default profile
+    weight: 2.0
+  - pluginRef: queue-scorer # Recommended: not in default profile
+    weight: 2.0
+  - pluginRef: max-score-picker # Default picker (auto-injected if omitted)
+```
+
+##### Scheduling Profile Fields
+
+- `name`: The unique name of the scheduling profile.
+- `plugins`: A list of plugins that make up the scheduling pipeline for this profile.
+
+##### Profile Plugin Fields
+
+- `pluginRef`: References a plugin by its name (or type if name was omitted) defined in the top-level `plugins` section.
+- `weight`: Optional float weight applied if the referenced plugin is a Scorer. If omitted for a scorer, it defaults to `1.0`.
+
+> [!CAUTION]
+> If you define multiple pickers in the top-level `plugins` section and omit `schedulingProfiles`, the auto-generated `default` profile will include references to **all** of them, which will cause an error during initialization (see Multiple Pickers below).
+
+<details>
+<summary><b>Defaulting Behaviors</b></summary>
+
+The system applies a multi-tiered defaulting logic for scheduling profiles:
+
+- **Tier 1: Omitted `schedulingProfiles`**: If the `schedulingProfiles` section is entirely omitted, a profile named `default` is automatically created. This profile will reference **all Filter, Scorer, and Picker plugins** defined in the top-level `plugins` section.
+- **Tier 2: Empty `plugins` in a profile**: If you define a profile but leave the `plugins` list empty, it is valid but only gets the auto-injected picker (see Tier 3).
+- **Tier 3: Missing Picker in a profile**: If a profile does not reference a picker plugin, the system automatically injects `max-score-picker`.
+
+</details>
+
+##### Framework Execution Rules
+
+While the YAML configuration presents a flat list of plugins within a profile, the framework processes them with specific rules:
+
+- **Interface Roles**: Internally, the framework categorizes referenced plugins by their role (Filter, Scorer, or Picker) based on the interfaces they implement.
+- **Execution Order**: Plugins are executed in this order: Filters first, then Scorers, and finally the Picker.
+- **Multiple Pickers**: A scheduling profile **cannot** have more than one picker. Referencing more than one picker in a profile's `plugins` list will cause a runtime error during profile initialization.
+- **Scorer Weights**: If the `weight` field is omitted for a scorer, it defaults to `1.0`. Scores from multiple scorers are accumulated after multiplying by their respective weights.
+
+##### Profile Handlers and Use Cases
+
+- **Multiple Profiles**: While a single profile is sufficient for simple serving, advanced use cases like **disaggregated prefill** require two or more profiles to handle different types of requests differently.
+- **Profile Handler**: When multiple profiles are defined, you must instantiate and configure a **Profile Handler** plugin in the top-level `plugins` section. The Profile Handler determines which `SchedulingProfile` to use for each incoming request.
+- **Single Profile Default**: If only one profile is defined, the system implicitly uses a `SingleProfileHandler` to route all requests to that profile, so no explicit handler configuration is required.
+
+For a popular plugin like `prefix-cache-scorer`, you configure it in the top-level `plugins` section and reference it in a profile:
+
+```yaml
+plugins:
+- type: prefix-cache-scorer
+  parameters:
+    blockSizeTokens: 64 # Default
+    maxPrefixBlocksToMatch: 256 # Default
+    lruCapacityPerServer: 31250 # Default
+
+# ...
+
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: prefix-cache-scorer
+    weight: 3.0 # Default
+```
+
+<details>
+<summary><b>Advanced Example: Multiple Profiles and Profile Handler</b></summary>
+
+For advanced use cases requiring multiple profiles, you must configure a custom Profile Handler in the top-level `plugins` list. The system auto-detects it by checking which plugin implements the `ProfileHandler` interface.
+
+```yaml
+plugins:
+- name: my-custom-profile-handler
+  type: custom-profile-handler # Must implement framework.ProfileHandler
+  parameters:
+    # ... handler specific configuration ...
+- name: filter-a
+  type: some-filter
+- name: filter-b
+  type: another-filter
+- name: scorer-1
+  type: some-scorer
+- name: max-score-picker
+  type: max-score-picker
+
+schedulingProfiles:
+- name: profile-a
+  plugins:
+  - pluginRef: filter-a
+  - pluginRef: scorer-1
+  - pluginRef: max-score-picker
+- name: profile-b
+  plugins:
+  - pluginRef: filter-b
+  - pluginRef: scorer-1
+  - pluginRef: max-score-picker
+```
+
+> [!IMPORTANT]
+> Only **one** profile handler plugin is allowed in the configuration. If multiple profiles are defined, you must provide a handler that supports them (the default `single-profile-handler` does not support multiple profiles).
+
+</details>
+
+### `dataLayer`
+
+The `dataLayer` section configures the backend sources and metrics collection used for smart scheduling decisions and observability. It defines a list of data sources and the extractors that pull data from them.
+
+> For full details and a list of available data sources and extractors, see the Data Layer reference (TODO: add link to datalayer.md once written).
+
+```yaml
+dataLayer:
+  sources:
+  - pluginRef: metrics-data-source # References a plugin in the 'plugins' section
+    extractors:
+    - pluginRef: core-metrics-extractor # References a plugin in the 'plugins' section
+```
+
+##### Fields
+
+- `sources`: A list of data sources to be polled or monitored.
+  - `pluginRef`: References a plugin instance defined in the global `plugins` section that implements the `DataSource` interface.
+  - `extractors`: A list of extractors associated with this data source.
+    - `pluginRef`: References a plugin instance defined in the global `plugins` section that implements the `Extractor` interface.
+
+> [!NOTE]
+> If the `dataLayer` section is omitted, the system automatically instantiates default plugins (typically `metrics-data-source` and `core-metrics-extractor`) to enable standard metrics collection and extraction for scheduling decisions.
+
+## High Availability
+
+To deploy the EndpointPicker in a high-availability (HA) active-passive configuration, set `replicas` to be greater than one. In such a setup, only one "leader" replica will be active and ready to process traffic at any given time. If the leader pod fails, another pod will be elected as the new leader, ensuring service continuity.
 
 To enable HA, set `inferenceExtension.replicas` to a number greater than 1.
 
-### Monitoring
+## Monitoring
 
 The EPP exposes a Prometheus-compatible metrics endpoint on **port 9090** at `/metrics`. These metrics provide visibility into request processing, scheduling decisions, flow control behavior, and backend pool health.
 
 > For full upstream documentation, see the [Gateway API Inference Extension Metrics & Observability Guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/metrics-and-observability/).
 
-#### EPP Request Metrics
+### EPP Metrics by Subsystem
 
-The following metrics track request-level behavior. Unless otherwise noted, they carry the labels `model_name` and `target_model_name`.
+Metrics are organized by the subsystem that owns the logic. For detailed tables of metrics available in each subsystem, see:
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `inference_objective_request_total` | Counter | Total request count per model |
-| `inference_objective_request_error_total` | Counter | Total error count per model |
-| `inference_objective_request_duration_seconds` | Distribution | End-to-end response latency |
-| `inference_objective_normalized_time_per_output_token_seconds` | Distribution | Normalized Time Per Output Token (NTPOT) |
-| `inference_objective_request_sizes` | Distribution | Request size in bytes |
-| `inference_objective_response_sizes` | Distribution | Response size in bytes |
-| `inference_objective_input_tokens` | Distribution | Input token count per request |
-| `inference_objective_output_tokens` | Distribution | Output token count per request |
-| `inference_objective_running_requests` | Gauge | Currently active requests per model |
-
-> **Note:** Response-level metrics (response sizes, output tokens, NTPOT) require Envoy body mode to be set to `Buffered` or `Streamed`. For vLLM streaming responses with usage data, include `stream_options: {"include_usage": true}` in the request.
-
-#### Pool & Scheduling Metrics
-
-These metrics provide visibility into the InferencePool health and scheduling decisions.
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `inference_pool_average_kv_cache_utilization` | Gauge | `name` | Average KV cache utilization across the pool |
-| `inference_pool_average_queue_size` | Gauge | `name` | Average number of pending requests across the pool |
-| `inference_pool_per_pod_queue_size` | Gauge | `model_server_pod`, `name` | Queue size for each individual pod |
-| `inference_pool_ready_pods` | Gauge | `name` | Number of ready pods in the pool |
-| `inference_extension_info` | Gauge | `commit`, `build_ref` | EPP build information |
-| `inference_extension_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `pod_name`, `namespace`, `port` | Number of scheduling attempts and their outcomes |
+*   **[Request Handling Metrics](request-handling.md#metrics--observability)**: Request volume, latency, token usage, and success rates.
+*   **[Flow Control Metrics](flow-control.md#metrics--observability)**: Queue sizes, dispatch cycles, and pool saturation.
+*   **[Scheduling Metrics](scheduling.md#metrics--observability)**: Scheduler performance and pool health state.
 
 
 
-#### Monitoring Stack
+### Monitoring Stack
 
 The recommended monitoring stack is **Prometheus + Grafana**. A pre-built Grafana dashboard is available at [`tools/dashboards/inference_gateway.json`](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/tools/dashboards/inference_gateway.json) in the upstream repository.
 

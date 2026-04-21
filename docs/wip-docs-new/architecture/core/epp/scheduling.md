@@ -46,7 +46,7 @@ flowchart TD
 
 *   **Scheduler**: The main orchestrator that manages the scheduling cycle. It invokes the configured `ProfileHandler` to pick profiles and then runs the selected profiles to obtain target endpoints.
 *   **InferenceRequest**: A structured internal representation of the incoming request produced by the [`Parser`](request-handling.md), including the target model, parsed body (Completions, ChatCompletions, etc.), headers, and objectives.
-*   **Endpoint**: Represents a candidate serving engine, with its metadata (e.g., Pod name, namespace and port) and state (e.g., active models, queue depth and KV-cache). Note that a Pod may run one or more endpoints each on a different port, this is case in [the data parallel deployment mode](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/).
+*   **Endpoint**: Represents a candidate serving engine, with its metadata (e.g., Pod name, namespace and port) and state (e.g., active models, queue depth and KV-cache). Note that a Pod may run one or more endpoints each on a different port, this is the case in [the data parallel deployment mode](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/).
 
 ### Extension Points
 
@@ -90,9 +90,11 @@ When a profile runs, it first filters the candidate endpoints. If any remain, it
 *   **[`lora-affinity-scorer`](placeholder-link)**: Prefers endpoints that already have the requested LoRA adapter active or have capacity to load it.
 *   **[`prefix-scorer`](placeholder-link)**: Scores based on the length of the prefix cache match.
 *   **[`queue-depth-scorer`](placeholder-link)**: Prefers endpoints with shorter request queues.
-*   **[`running-requests-scorer`](placeholder-link)**: Scores based on the number of currently active requests.
+*   **[`running-requests-size-scorer`](placeholder-link)**: Scores based on the number of currently active requests.
 *   **[`token-load-scorer`](placeholder-link)**: Scores based on the total token load (input + output) handled by the endpoint.
 *   **[`precise-prefix-cache-scorer`](placeholder-link)**: Scores requests based on real-time KV-cache locality. While the `prefix-scorer` relies on historical scheduling estimates, this version tracks actual cache states via model server events to ensure higher precision.
+  > [!NOTE]
+  > If you configure this plugin but do not explicitly configure its required data producer (`approx-prefix-cache-producer`), the loader will automatically instantiate it with the same parameters. This was done for historical reasons to simplify configuration when data producers were introduced.
 *   **[`session-affinity-scorer`](placeholder-link)**: Assigns a maximum score to the specific endpoint that handled previous requests for the same session, while all other endpoints receive the minimum score.
 *   **[`no-hit-lru-scorer`](placeholder-link)**: For cold requests (zero cache hits), the scorer prioritizes endpoints that have never handled one, followed by those used least recently. This ensures an even distribution of the intensive "prefill" workload across the cluster. If a request has existing cache hits, the scorer assigns equal scores to all endpoints (scorer has no impact).
 
@@ -136,3 +138,45 @@ flowchart TD
 The `ProfileHandler` uses the `Pick` extension point to determine which profiles need to run for a given request (e.g., if a request needs both prefill and decode, or just decode if the KV cache is already transferred). If both are needed, the prefill and decode endpoints are picked at the same time. The `ProfileHandler` then uses the `ProcessResults` extension point to merge the results from both profiles. This merging ensures that the **decode endpoint** is returned as the primary destination for the proxy to forward the original request. Simultaneously, the **prefill endpoint** is injected into the request as a specialized header. When the request reaches the decode worker, the **sidecar** running alongside the decoder intercepts it, extracts the prefill endpoint from the header, and coordinates a remote prefill from the selected prefill worker before the decoding process begins.
 
 See [Disaggregated Serving](../../advanced/disaggregation.md) for more details on the design and request flow.
+
+---
+
+## Metrics & Observability
+
+The EPP Scheduler exposes detailed metrics to track pool health and scheduling decisions.
+
+### Pool & Scheduling Metrics
+
+The following metrics provide visibility into the InferencePool health and scheduling decisions.
+
+#### Pool Health Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `inference_pool_ready_pods` | Gauge | `name` | Number of ready pods in the pool |
+| `inference_pool_average_kv_cache_utilization` | Gauge | `name` | Average KV cache utilization across the pool |
+| `inference_pool_average_queue_size` | Gauge | `name` | Average number of pending requests across the pool |
+| `inference_pool_per_pod_queue_size` | Gauge | `model_server_pod`, `name` | Queue size for each individual pod |
+| `inference_pool_average_running_requests` | Gauge | `name` | Average number of running requests across the pool |
+
+#### Scheduler Performance Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `inference_extension_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `pod_name`, `namespace`, `port` | Number of scheduling attempts and their outcomes |
+| `inference_extension_scheduler_e2e_duration_seconds` | Distribution | *None* | End-to-end scheduling latency |
+| `inference_extension_plugin_duration_seconds` | Distribution | `extension_point`, `plugin_type`, `plugin_name` | Processing latency for each plugin |
+
+#### Prefix Cache Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `inference_extension_prefix_indexer_size` | Gauge | *None* | Size of the prefix indexer |
+| `inference_extension_prefix_indexer_hit_ratio` | Distribution | *None* | Hit ratio for prefix matches |
+| `inference_extension_prefix_indexer_hit_bytes` | Distribution | *None* | Bytes matched in prefix cache lookup |
+
+#### System Info
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `inference_extension_info` | Gauge | `commit`, `build_ref` | EPP build information |

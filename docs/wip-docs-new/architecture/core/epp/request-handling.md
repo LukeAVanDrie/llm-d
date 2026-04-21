@@ -1,9 +1,8 @@
 # EPP Request Handling
 
-
 ## Functionality
 
-The EPP Request Handling component manages the lifecycle of an inference request before and after the scheduling phase. It handles parsing the request payload, preparing and managing state for the [Scheduler](scheduling.md), interacting with [Flow Control](flow-control.md), and processing the response from the model server. It is responsible for managing the state of the request throughout its full lifecycle.
+The EPP Request Handling component manages the lifecycle of an inference request before and after the scheduling phase. It handles parsing the request payload, preparing and managing state for the [Scheduler](scheduling.md), interacting with [Flow Control](flow-control.md), and processing the response from the model server.
 
 ## Design
 
@@ -22,7 +21,7 @@ flowchart TD
     Client([Return to Client])
     Reject[Reject Request]:::danger
 
-   
+
 
     subgraph EPP ["EPP Request Handling"]
         direction TB
@@ -46,28 +45,35 @@ flowchart TD
     Endpoint --> Client
 ```
 
-
 #### Core Components
 
-*   **Parser**: Responsible for parsing the incoming request to structured internal representation consumable by the scheduler, and parsing the response to extract usage data if reported by the model server.
-*   **DataProducer**: A pluggable extension that allows customizing request pre-processing and producing per-request state needed for scheduling, such as tokenization, prefix-cache matches, predicted processing latency etc..
+*   **Parser**: Responsible for parsing the incoming request to a structured internal representation consumable by the scheduler, and parsing the response to extract usage data if reported by the model server.
+*   **DataProducer**: A pluggable extension that allows customizing request pre-processing and producing per-request state needed for scheduling, such as tokenization, prefix-cache matches, predicted processing latency etc.
 *   **Admitter**: Decides whether to admit a request based on criteria like latency SLOs. Runs after dataProducer but before scheduling. Requests failing admission are rejected, while admitted requests proceed to the scheduling phase.
+
+#### Advanced Hooks
+
+The framework also supports advanced, auto-resolved hooks in the request control layer. If a plugin implements these interfaces, it is automatically wired into the execution flow:
+
+*   **`PreRequest`**: Executes before the request is processed (e.g., for incrementing in-flight counts).
+*   **`ResponseHeaderProcessor`**: Executes when response headers are received from the backend.
+*   **`ResponseBodyProcessor`**: Executes during response streaming (e.g., for usage tracking on completion).
+ 
+ > [!NOTE]
+ > In practice, these interfaces are often implemented by Data Producers to maintain state or track metrics across the request lifecycle. For example, the `predicted-latency-producer` implements these hooks to track request latency.
+
 
 ---
 
 ### Concrete Plugins
 
 #### Parsers
-*   **[`openai-parser`](placeholder-link)**: The default parser supporting the OpenAI API. It parses request payloads to extract model name and prompts, and response payloads to extract usage data (tokens). It supports the following endpoints:
-    *   `/conversations`
-    *   `/responses`
-    *   `/chat/completions`
-    *   `/completions`
-    *   `/embeddings`
-*   **[`vllmgrpc-parser`](placeholder-link)**: A parser designed to handle requests specifically for the vLLM gRPC API. It supports:
-    *   `Generate`
-    *   `Embed`
-*   **[`passthrough-parser`](placeholder-link)**: A model-agnostic parser that supports any request format by passing the request body through without interpretation.
+
+Parser plugins understand the payloads of requests and responses. This is key for features like prefix-cache aware scheduling and response usage tracking.
+
+*   **[`openai-parser`](placeholder-link)**: The default parser supporting the OpenAI API. Supported endpoints: `/conversations`, `/responses`, `/chat/completions`, `/completions`, `/embeddings`.
+*   **[`vllmgrpc-parser`](placeholder-link)**: Handles requests for the vLLM gRPC API. Supported methods: `Generate`, `Embed`.
+*   **[`passthrough-parser`](placeholder-link)**: Model-agnostic parser that passes content through without interpretation. Note that payload-related scheduling (e.g., `prefix-cache-scorer`) is not supported with this parser.
 
 #### Admitter Plugins
 *   **[`latency-slo-admitter`](placeholder-link)**: Rejects sheddable requests (priority < 0) when no endpoint can meet latency SLO constraints.
@@ -77,3 +83,44 @@ flowchart TD
 *   **[`inflight-load-producer`](placeholder-link)**: Tracks the number of in-flight requests and estimated tokens for each endpoint. It increments counts in `PreRequest` and decrements them in `ResponseBodyProcessor` on end-of-stream.
 *   **[`approx-prefix-cache-producer`](placeholder-link)**: Prepares data for approximate prefix cache aware scheduling by hashing prompts in blocks and matching them against an indexer of cached prefixes on servers.
 
+---
+
+## Metrics & Observability
+
+The Request Handling subsystem exposes metrics tracking request volume, success, latency, and token usage. Unless otherwise noted, these metrics carry the labels `model_name` and `target_model_name`.
+
+#### Request Volume & Success
+
+| Metric | Type | Description | Labels |
+|--------|------|-------------|--------|
+| `inference_objective_request_total` | Counter | Total request count per model | `model_name`, `target_model_name`, `priority` |
+| `inference_objective_request_error_total` | Counter | Total error count per model | `model_name`, `target_model_name`, `error_code` |
+| `inference_objective_running_requests` | Gauge | Currently active requests per model | `model_name` |
+
+#### Latency & SLOs
+
+| Metric | Type | Description | Labels |
+|--------|------|-------------|--------|
+| `inference_objective_request_duration_seconds` | Distribution | End-to-end response latency | `model_name`, `target_model_name` |
+| `inference_objective_normalized_time_per_output_token_seconds` | Distribution | Normalized Time Per Output Token (NTPOT) | `model_name`, `target_model_name` |
+| `inference_objective_request_ttft_seconds` | Distribution | Time to first token (TTFT) | `model_name`, `target_model_name` |
+| `inference_objective_request_predicted_ttft_seconds` | Distribution | Predicted TTFT | `model_name`, `target_model_name` |
+| `inference_objective_request_ttft_prediction_duration_seconds` | Distribution | Time spent predicting TTFT | `model_name`, `target_model_name` |
+| `inference_objective_request_predicted_tpot_seconds` | Distribution | Predicted TPOT | `model_name`, `target_model_name` |
+| `inference_objective_request_tpot_prediction_duration_seconds` | Distribution | Time spent predicting TPOT | `model_name`, `target_model_name` |
+| `inference_objective_request_slo_violation_total` | Counter | Total count of requests violating SLO | `model_name`, `target_model_name`, `type` |
+
+| Metric | Type | Description | Labels |
+|--------|------|-------------|--------|
+| `inference_objective_request_sizes` | Distribution | Request size in bytes | `model_name`, `target_model_name` |
+| `inference_objective_response_sizes` | Distribution | Response size in bytes | `model_name`, `target_model_name` |
+| `inference_objective_input_tokens` | Distribution | Input token count per request | `model_name`, `target_model_name` |
+| `inference_objective_output_tokens` | Distribution | Output token count per request | `model_name`, `target_model_name` |
+| `inference_objective_prompt_cached_tokens` | Distribution | Number of prompt cached tokens | `model_name`, `target_model_name` |
+
+> **Note:** Response-level metrics (response sizes, output tokens, NTPOT) require Envoy body mode to be set to `Buffered` or `Streamed`. For vLLM streaming responses with usage data, include `stream_options: {"include_usage": true}` in the request.
+
+| Metric | Type | Description | Labels |
+|--------|------|-------------|--------|
+| `inference_objective_inference_request_metric` | Gauge | Consolidated gauge for request metrics | `model_name`, `target_model_name`, `type` |
+| `inference_extension_model_rewrite_decisions_total` | Counter | Total number of model rewrite decisions | `model_rewrite_name`, `model_name`, `target_model` |
