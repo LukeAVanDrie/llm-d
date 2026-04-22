@@ -155,7 +155,6 @@ featureGates:
 **Supported Feature Gates:**
 
 - `flowControl`: Enables the Admission and Flow Control layer. This must be enabled to use the `flowControl` configuration section.
-- `dataLayer`: Enables the experimental Data Layer APIs for advanced metrics collection and extraction.
 
 ### Request Handling
 
@@ -176,13 +175,13 @@ parser:
   pluginRef: myParser
 ```
 
-If unspecified, `openai-parser` is used by default. (Note: Current parsers do not accept any configuration parameters in the `plugins` section).
+If unspecified, `openai-parser` is used by default.
 
 #### Admitters & Data Producers
 
 Admitters and Data Producers are specialized plugins that execute during the initial request processing phase:
 *   **Admitters** perform early checks to accept or reject requests before they enter the queue.
-*   **Data Producers** gather contextual information (like predicted latency or prefix cache status) required by downstream components.
+*   **Data Producers** gather per request contextual information (like predicted latency or prefix cache status) required by downstream components.
 
 As introduced in the [Mental Model](#configuration-mental-model-plugins-and-wiring), these plugins support automatic interface-based binding. This reduces boilerplate configuration that would otherwise be needed to wire them explicitly.
 
@@ -209,7 +208,7 @@ They are automatically active and do not need to be referenced elsewhere in the 
 
 ---
 
-### `flowControl`
+### Flow Control
 
 See [Flow Control](flow-control.md) for more architectural details on how the EPP's flow control layer works internally.
 
@@ -280,7 +279,7 @@ These fields apply to both `defaultPriorityBand` and entries in `priorityBands`:
 
 For a full list of available Fairness and Ordering policies, see the [Flow Control reference](flow-control.md#concrete-plugins).
 
-##### `saturationDetector`
+##### Saturation Detector
 
 > [!NOTE]
 > While `saturationDetector` is presented here conceptually as part of Flow Control, it is a **top-level field** in the YAML schema, at the same level as `flowControl`.
@@ -302,7 +301,7 @@ For a full list of available Saturation Detector plugins, see the [Flow Control 
 
 ---
 
-### `schedulingProfiles`
+### Scheduling Profiles
 
 The `schedulingProfiles` section configures the EPP's Scheduling component. For full architectural details and a list of available filters, scorers, and pickers, see the [Scheduling reference](scheduling.md).
 
@@ -338,7 +337,7 @@ schedulingProfiles:
 > If you define multiple pickers in the top-level `plugins` section and omit `schedulingProfiles`, the auto-generated `default` profile will include references to **all** of them, which will cause an error during initialization (see Multiple Pickers below).
 
 <details>
-<summary><b>Defaulting Behaviors</b></summary>
+<summary>Defaulting Behaviors</summary>
 
 The system applies a multi-tiered defaulting logic for scheduling profiles:
 
@@ -348,7 +347,7 @@ The system applies a multi-tiered defaulting logic for scheduling profiles:
 
 </details>
 
-##### Framework Execution Rules
+##### Profile Execution Rules
 
 While the YAML configuration presents a flat list of plugins within a profile, the framework processes them with specific rules:
 
@@ -415,8 +414,7 @@ schedulingProfiles:
   - pluginRef: max-score-picker
 ```
 
-> [!IMPORTANT]
-> Only **one** profile handler plugin is allowed in the configuration. If multiple profiles are defined, you must provide a handler that supports them (the default `single-profile-handler` does not support multiple profiles).
+**Important:** Only one profile handler plugin is allowed in the configuration. If multiple profiles are defined, you must provide a handler that supports them (the default `single-profile-handler` does not support multiple profiles).
 
 </details>
 
@@ -442,13 +440,13 @@ dataLayer:
     - `pluginRef`: References a plugin instance defined in the global `plugins` section that implements the `Extractor` interface.
 
 > [!NOTE]
-> If the `dataLayer` section is omitted, the system automatically instantiates default plugins (typically `metrics-data-source` and `core-metrics-extractor`) to enable standard metrics collection and extraction for scheduling decisions.
+> If the `dataLayer` section is omitted, the system automatically instantiates default plugins (the `metrics-data-source` and `core-metrics-extractor`) to enable standard metrics collection and extraction for scheduling decisions.
 
 ## High Availability
 
 To deploy the EndpointPicker in a high-availability (HA) active-passive configuration, set `replicas` to be greater than one. In such a setup, only one "leader" replica will be active and ready to process traffic at any given time. If the leader pod fails, another pod will be elected as the new leader, ensuring service continuity.
 
-To enable HA, set `inferenceExtension.replicas` to a number greater than 1.
+To enable HA, ensure that the number of replicas in the EPP Deployment is greater than 1.
 
 ## Monitoring
 
