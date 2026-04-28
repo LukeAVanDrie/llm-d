@@ -45,7 +45,7 @@ In addition to inter-tenant prioritization and fairness, flow control also enabl
 
 ## Deploy
 
-The well-lit path and manifests will be released shortly.
+For detailed step-by-step instructions on how to deploy and configure Flow Control, see the [Flow Control Guide](../../../guides/flow-control/README.md).
 
 ## Architecture
 
