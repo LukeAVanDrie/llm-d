@@ -23,7 +23,7 @@ The following diagram illustrates the centralized queuing topology:
 flowchart TD
     TenantA["Tenant A (Pri: 100)"] --> QA[("Queue: Tenant A<br/>Band: 100")]
     TenantB["Tenant B (Pri: 0)"] --> QB[("Queue: Tenant B<br/>Band: 0")]
-    TenantC["Tenant C (Pri: 0)"] --> QC[("Queue: Tenant C<br/>Band: 0")]
+    TenantC["Tenant C (Pri: -10)"] --> QC[("Queue: Tenant C<br/>Band: -10")]
 
     QA --> Disp{Dispatcher}
     QB --> Disp
@@ -213,28 +213,6 @@ In this use case, we configure 3 priority tiers (Premium, Standard, Best-Effort)
 #### 1. Apply InferenceObjectives
 
 The `helm upgrade --install` command you ran earlier configured the EPP's underlying `EndpointPickerConfig` to map queues to priority bands. However, you must explicitly define these bands in the cluster using `InferenceObjective` resources.
-
-Here is a snippet of what we are applying to contrast a high-priority SLA versus a sheddable background workload:
-
-```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha2
-kind: InferenceObjective
-metadata:
-  name: premium-traffic
-spec:
-  priority: 100
-  poolRef:
-    name: default-pool
----
-apiVersion: inference.networking.x-k8s.io/v1alpha2
-kind: InferenceObjective
-metadata:
-  name: best-effort-traffic
-spec:
-  priority: -10
-  poolRef:
-    name: default-pool
-```
 
 Apply the full definitions (Premium, Standard, Best-Effort) provided in [objectives.yaml](./objectives.yaml) by running:
 
