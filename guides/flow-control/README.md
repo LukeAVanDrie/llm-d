@@ -331,18 +331,7 @@ For detailed instructions on how to derive the optimal `maxConcurrency` for your
 
 ## Observability
 
-The Flow Control layer exposes detailed metrics to track queuing dynamics.
-
-| Metric Name | Metric Type | Labels | Description |
-| :--- | :--- | :--- | :--- |
-| `inference_extension_flow_control_request_queue_duration_seconds` | Histogram | `fairness_id`, `priority`, `outcome`, `inference_pool`, `model_name`, `target_model_name` | Time requests spend in the Flow Control layer. |
-| `inference_extension_flow_control_queue_size` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Current number of requests in Flow Control. |
-| `inference_extension_flow_control_queue_bytes` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Current size in bytes of requests in Flow Control. |
-| `inference_extension_flow_control_request_enqueue_duration_seconds` | Histogram | `fairness_id`, `priority`, `outcome` | Time taken to enqueue requests. |
-| `inference_extension_flow_control_dispatch_cycle_duration_seconds` | Histogram | none | Time taken for each dispatch cycle. |
-| `inference_extension_flow_control_pool_saturation` | Gauge | `inference_pool` | Current saturation level of the pool. |
-
-A Grafana dashboard is available in the monitoring stack to visualize these metrics, making it easy to monitor queue depths and saturation state transitions.
+The Flow Control layer exposes detailed metrics to track queuing dynamics. Please refer to [flow control architecture](https://github.com/llm-d/llm-d/blob/main/docs/wip-docs-new/architecture/core/router/epp/flow-control.md) for more details.
 
 ## Cleanup
 
