@@ -2,7 +2,7 @@
 
 ## Overview
 
-Flow Control enables intelligent request queuing at the gateway level. Traditional load balancing falls short for LLMs because resource consumption varies wildly per request. Shifting queuing to the Endpoint Picker (EPP) enables:
+Flow Control enables intelligent request queuing at the llm-d Router level. Traditional load balancing falls short for LLMs because resource consumption varies wildly per request. Shifting queuing to the Router enables:
 
 * **Multi-Tenancy**: Prevent noisy neighbors from starving others and enforce fairness between tenants.
 * **No-Regret Scheduling**: Hold requests during peak saturation instead of committing them to a server's local queue where they become stuck.
