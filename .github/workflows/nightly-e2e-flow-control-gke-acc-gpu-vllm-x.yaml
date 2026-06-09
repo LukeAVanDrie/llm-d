@@ -1,0 +1,93 @@
+name: Nightly - Flow Control E2E (GKE GPU)
+
+# Nightly regression test for the flow-control guide (standalone router, vLLM).
+# Reuses the optimized-baseline model servers relabeled to flow-control, applies
+# the guide's priority-band InferenceObjectives, and hands off (via
+# --extra-validate) to e2e-validate-flow-control.sh, which forces queue
+# contention and checks backpressure, per-band isolation, and priority QoS.
+#
+# The deploy lowers concurrency-detector maxConcurrency (see below) so a modest
+# burst deterministically saturates the pool — without it the assertions race.
+#
+# Scope: proves priority ordering only. Weighted multi-tenant fairness/SLO at
+# scale needs inference-perf multi-tenant trace replay (the heavy tier).
+
+on:
+  schedule:
+    - cron: '0 15 * * *'  # 15:00 UTC daily (staggered from sibling nightlies)
+  workflow_dispatch:
+    inputs:
+      skip_cleanup:
+        description: 'Skip cleanup after tests (for debugging)'
+        required: false
+        default: 'false'
+      pr_number:
+        description: 'PR number for comment-back (set by /test-nightly)'
+        required: false
+        default: ''
+      pr_repo:
+        description: 'Repo for PR comment-back'
+        required: false
+        default: 'llm-d/llm-d'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-e2e-flow-control-gke
+  cancel-in-progress: true
+
+jobs:
+  nightly:
+    if: github.repository == 'llm-d/llm-d'
+    uses: llm-d/llm-d-infra/.github/workflows/reusable-nightly-e2e-gke.yaml@main
+    with:
+      guide_name: flow-control
+      namespace: llm-d-nightly-flow-control-gke
+      gateway_host: 'flow-control-epp'
+      custom_deploy_script: |
+        export GAIE_VERSION=v1.5.0
+        export ROUTER_CHART_VERSION=v0
+        export GUIDE_NAME="flow-control"
+        export INFRA_PROVIDER="gke"
+        # Reuse optimized-baseline model servers, relabeled to flow-control
+        # (guide README "Deploy the Model Server" step).
+        kubectl kustomize guides/optimized-baseline/modelserver/gpu/vllm/${INFRA_PROVIDER}/ \
+          | sed "s/optimized-baseline/${GUIDE_NAME}/g" \
+          | kubectl apply -n ${NAMESPACE} -f -
+        # Ensure the llm-d InferenceObjective CRD exists, then apply the guide's
+        # objectives — they define the priority bands the validate script
+        # targets; without them, tagged traffic falls back to band 0. Sibling
+        # nightlies don't apply objectives, so the CRD isn't guaranteed present.
+        kubectl apply -k "https://github.com/llm-d/llm-d-router/config/crd?ref=${ROUTER_CHART_VERSION}"
+        kubectl apply -f guides/${GUIDE_NAME}/objectives.yaml -n ${NAMESPACE}
+        # CI-only: force a low maxConcurrency so the saturation gate closes under
+        # a modest burst (deterministic backpressure). Match the key, not the
+        # guide's current value, so a future retune can't silently no-op this;
+        # fail loudly if the substitution doesn't take.
+        sed -E 's/(maxConcurrency:)[[:space:]]+[0-9]+/\1 4/' \
+          guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml > /tmp/flow-control.ci.values.yaml
+        grep -qE '^[[:space:]]*maxConcurrency:[[:space:]]+4$' /tmp/flow-control.ci.values.yaml \
+          || { echo "ERROR: failed to override maxConcurrency in ${GUIDE_NAME} values" >&2; exit 1; }
+        # CI-only: let the validate script's curl pod scrape /metrics without a
+        # bearer token. The production guide default (auth on) is unchanged.
+        helm install ${GUIDE_NAME} \
+          oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev \
+          -f guides/recipes/router/base.values.yaml \
+          -f /tmp/flow-control.ci.values.yaml \
+          --set router.monitoring.prometheus.auth.enabled=false \
+          -n ${NAMESPACE} --version ${ROUTER_CHART_VERSION}
+      e2e_validate_args: '--extra-validate flow-control'
+      gke_cluster_name: llm-d-e2e-us-east5
+      gke_cluster_zone: us-east5
+      required_gpus: 2
+      recommended_gpus: 4
+      accelerator_type: H100
+      pod_wait_timeout: '30m'
+      pod_readiness_delay: 0
+      allow_gpu_preemption: true
+      llm_d_ref: ${{ github.ref }}
+      skip_cleanup: ${{ github.event.inputs.skip_cleanup == 'true' }}
+      pr_number: ${{ github.event.inputs.pr_number }}
+      pr_repo: ${{ github.event.inputs.pr_repo }}
+    secrets: inherit
