@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decode
+spec:
+  replicas: 1
+  # Single-replica on a scarce TPU slice: Recreate avoids a rollout deadlock where
+  # the surge pod can't schedule while the old pod still holds the only free slice.
+  strategy:
+    type: Recreate
+  template:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-tpu-topology: "2x2x1"
+        cloud.google.com/gke-tpu-accelerator: "tpu7x"
+      containers:
+        - name: modelserver
+          command: ["vllm", "serve"]
+          # All args live in the overlay for a single source of truth.
+          args:
+            - "google/gemma-4-31B-it"
+            - "--port=8000"
+            - "--seed=42"
+            - "--tensor-parallel-size=8"   # 4 tpu7x chips x 2 cores = 8
+            - "--max-model-len=32768"
+            - "--download-dir=/data"
+            - "--async-scheduling"
+            - "--gpu-memory-utilization=0.90"
+            - "--disable_chunked_mm_input"
+            - "--enable-auto-tool-choice"
+            - "--tool-call-parser=gemma4"
+            - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
+            # Prefix caching is ON (we intentionally do NOT pass
+            # --no-enable-prefix-caching) for multimodal prefix reuse.
+            # --- debug logging: REMOVE for production ---
+            - "--enable-prompt-tokens-details"
+            - "--enable-log-requests"
+            - "--enable-log-outputs"
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: llm-d-hf-token
+                  key: HF_TOKEN
+            - name: HF_HOME
+              value: /data
+            # --- debug logging: REMOVE for production ---
+            - name: VLLM_LOGGING_LEVEL
+              value: "DEBUG"
+          resources:
+            # Only the TPU resource is constrained. The 31B weights + vision tower
+            # stage through host RAM during load; a memory *limit* (e.g. 64Gi) gets the
+            # container OOMKilled mid-load. tpu7x-standard-4t has ~920Gi/224 vCPU and
+            # runs one pod, so we leave host cpu/memory unbounded (matches known-good
+            # TPU decode configs on this machine type).
+            limits:
+              google.com/tpu: 4
+            requests:
+              google.com/tpu: 4
+          volumeMounts:
+            - mountPath: /.cache
+              name: torch-compile-cache
+            - mountPath: /data
+              name: data-volume
+            - mountPath: /dev/shm
+              name: dshm
+          startupProbe:
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+      volumes:
+        - name: torch-compile-cache
+          emptyDir: {}
+        - name: data-volume
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
