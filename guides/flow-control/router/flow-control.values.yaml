@@ -24,7 +24,7 @@ router:
         - type: fcfs-ordering-policy
         - type: concurrency-detector
           parameters:
-            maxConcurrency: 132
+            maxConcurrency: 112
             concurrencyMode: requests
             headroom: 0.0
 

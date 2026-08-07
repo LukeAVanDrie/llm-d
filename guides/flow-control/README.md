@@ -1,4 +1,4 @@
-# [Experimental] Flow Control
+# Flow Control
 
 [![E2E (GKE GPU)](https://github.com/llm-d/llm-d/actions/workflows/consolidate-status-flow-control-gke-acc-gpu-vllm-x.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/consolidate-status-flow-control-gke-acc-gpu-vllm-x.yaml)
 
@@ -17,7 +17,7 @@ Incoming requests are classified by a `FlowKey` (Fairness ID + Priority). EPP ma
 2. **Fairness**: Cycling through tenants within a band.
 3. **Ordering**: Ordering requests within a flow.
 
-*While Backpressure protects the physical hardware from overload, the Multi-Tenancy policies dictate exactly how that delayed traffic is ordered and distributed among your users.*
+Backpressure decides how much traffic waits. The multi-tenancy policies decide the order in which waiting traffic is served.
 
 The following diagram illustrates the centralized queuing topology:
 
@@ -46,20 +46,27 @@ The following default hardware configuration is inherited from the [Optimized Ba
 | GPUs per replica   | 2                                                       |
 | Total GPUs         | 16                                                      |
 
-When the `flowControl` feature gate is enabled, the EPP uses the following policies by default. These defaults are explicitly designed to mimic legacy, non-flow-control behavior (Strict FCFS) to ensure a seamless transition for existing workloads.
+Flow control is a GA feature that is **enabled explicitly**: set
+`featureGates: ["flowControl"]` in the `EndpointPickerConfig`, as this guide's values file
+does. Enabling it deliberately means you have read this guide and the
+[Tuning Guide](tuning.md); the layer changes where queueing happens under saturation, so
+turn it on with intent. The out-of-the-box policies mimic legacy, non-flow-control behavior
+(strict FCFS) below saturation:
 
-| Policy Type | Default Plugin | Description |
+| Policy Type | Default Plugin / Value | Description |
 | :--- | :--- | :--- |
 | **Fairness** | `global-strict-fairness-policy` | Ignores flow isolation and serves all requests in a single global order. |
 | **Ordering** | `fcfs-ordering-policy` | First-Come, First-Served based on arrival time. |
 | **Saturation** | `utilization-detector` | Closed-loop detector reacting to real-time telemetry. |
+| **Queue TTL** | `defaultRequestTTL: 60s` | Bounds queue wait; an explicit `0s` disables it. Where the gateway timeout is shorter, that fires first. |
+| **Band limits** | `maxRequests: 5000` / `maxBytes: 1G` per band | Router defaults when unset. This guide's values file sets tighter per-band limits (500/200/50) for the demo bands. Per EPP replica. |
 
 > [!NOTE]
 >
-> * Beneath the flow control layer, this guide uses the exact same `prefix-cache-scorer` and `load-aware` routing policies established in the [Optimized Baseline](../optimized-baseline/README.md). Flow control acts as an intelligent ingress layer that holds saturated traffic *before* it passes to the scheduler.
-> * While `utilization-detector` is the out-of-the-box system default listed here, production deployments should switch to `concurrency-detector` to avoid telemetry lag risks, as detailed in the [Tuning Guide](tuning.md).
+> * Flow control acts as an ingress layer that holds saturated traffic *before* it passes to the scheduler; the scheduling profile beneath it is this guide's own values file. If you are layering flow control onto another guide's deployment, keep that guide's scheduler plugins and add only the `featureGates`, detector, and `flowControl` blocks.
+> * `utilization-detector` is the out-of-the-box default; this guide's values switch to `concurrency-detector`. The [Tuning Guide](tuning.md) has the decision tree for choosing between them.
 
-By default, the EPP uses a `global-strict` policy. Because the system is **work-conserving**, it will never artificially throttle traffic if GPUs have spare capacity. However, enforcing strict fairness (like Round-Robin) during periods of saturation constrains the scheduler's ability to pick the globally optimal request for batching or cache reuse, thereby bounding the maximum explorable latency-throughput frontier. The default prioritizes absolute global throughput, while this guide overrides it to prioritize tenant equity.
+By default, the EPP uses a `global-strict` policy. The system is *work-conserving*: it never artificially throttles traffic while GPUs have spare capacity, so the policy choice only matters at saturation. Under saturation, strict fairness (like round-robin) constrains the scheduler's ability to pick the globally optimal request for batching or cache reuse, which can cost some peak throughput. The default favors total throughput; this guide overrides it to favor tenant equity.
 
 ### Supported Hardware Backends
 
@@ -309,12 +316,21 @@ To verify backpressure management, you must overwhelm the pool's capacity. Becau
     exit
     ```
 
-## Production Tuning: Deriving `maxConcurrency`
+## Production Tuning
 
 > [!IMPORTANT]
-> The `maxConcurrency` value of `132` used in this guide is empirically tuned **only** for the default reference workload (Qwen3-32B on 16 H100s). If you use a different model, hardware, or have different prompt lengths, you **must** calculate your own `maxConcurrency` to prevent GPU starvation or OOMs.
+> The `maxConcurrency` value in this guide's values file is derived **only** for the default
+> reference workload (Qwen3-32B on 16 H100s). A different model, hardware, replica shape, or
+> prompt-length distribution invalidates it.
 
-For detailed instructions on how to derive the optimal `maxConcurrency` for your specific workload, see the [Tuning Guide](tuning.md).
+Derive your own value with the [Tuning Guide](tuning.md). It walks a decision tree from
+detector choice to a limit value with a confidence bound, and a wizard does most of the work.
+The production check is one counter: `vllm:num_preemptions_total` stays flat at peak when the
+limit is right, and climbs when it is not.
+
+Operational sharp edges (stale-telemetry behavior, per-EPP-replica limits, TTL vs gateway
+timeout, the troubleshooting table) live in the guide's
+[operational notes](tuning.md#operational-notes).
 
 ## Benchmarking
 
